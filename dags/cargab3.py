@@ -7,74 +7,10 @@ import os
 import logging
 
 def get_db_connection():
-    """Obtém uma conexão com o banco de dados PostgreSQL."""
     hook = PostgresHook(postgres_conn_id='postgres_default')
     return hook.get_conn()
 
-def extract():
-    logging.info("Iniciando a extração...")
-    anos = ['2022', '2023', '2024']
-    arquivos = [f'/opt/airflow/files/COTAHIST_A{ano}.txt' for ano in anos]
-    
-    logging.info("Caminhos absolutos dos arquivos: %s", [os.path.abspath(arquivo) for arquivo in arquivos])
-    
-    separar_campos = [2, 8, 2, 12, 3, 12, 10, 3, 4, 13, 13, 13, 13, 13, 13, 13, 5, 18, 18, 13, 1, 8, 7, 13, 12, 3]
-    colunas = [
-        "tipo_registro", "data_pregao", "cod_bdi", "cod_negociacao", "tipo_mercado", 
-        "nome_empresa", "especificacao_papel", "prazo_dias_merc_termo", "moeda", 
-        "preco_abertura", "preco_maximo", "preco_minimo", "preco_medio", 
-        "preco_ultimo_negocio", "preco_melhor_oferta_compra", "preco_melhor_oferta_venda", 
-        "numero_negocios", "quantidade_papeis_negociados", "volume_total_negociado", 
-        "preco_exercicio", "indicador_correcao_precos", "data_vencimento", 
-        "fator_cotacao", "preco_exercicio_pontos", "codigo_isin", "num_distribuicao_papel"
-    ]
-    acoes = ['PETR4', 'VALE3', 'MGLU3', 'RAIZ4', 'AMBP3', 'B3SA3', 'ABEV3', 'ITUB4', 'WEGE3', 'BBDC4', 'QUAL3']
-
-    todos_dados = []
-    chunk_size = 10000
-    
-    try:
-        for arquivo in arquivos:
-            logging.info("Processando arquivo: %s", arquivo)
-            
-            if not os.path.isfile(arquivo):
-                logging.error("Arquivo não encontrado: %s", arquivo)
-                continue
-
-            for chunk in pd.read_fwf(arquivo, widths=separar_campos, header=0, chunksize=chunk_size):
-                logging.info("Lendo um bloco de dados...")
-                
-                chunk.columns = colunas
-                
-                chunk = chunk[chunk['cod_negociacao'].isin(acoes)]
-                logging.info("Número de registros filtrados neste bloco: %d", chunk.shape[0])
-
-                dinheiro = [
-                    "preco_abertura", "preco_maximo", "preco_minimo", 
-                    "preco_medio", "preco_ultimo_negocio", 
-                    "preco_melhor_oferta_compra", "preco_melhor_oferta_venda"
-                ]
-
-                for coluna in dinheiro:
-                    if coluna in chunk.columns:
-                        logging.info("Antes da divisão - %s: %s", coluna, chunk[coluna].head())
-                        chunk[coluna] = chunk[coluna].astype(float) / 100
-                        logging.info("Depois da divisão - %s: %s", coluna, chunk[coluna].head())
-
-                chunk['data_pregao'] = pd.to_datetime(chunk['data_pregao'], format='%Y%m%d', errors='coerce')
-                chunk['data_pregao'] = chunk['data_pregao'].dt.strftime('%d/%m/%Y')
-
-                todos_dados.extend(chunk.to_dict(orient='records'))
-
-        logging.info("Total de registros extraídos: %d", len(todos_dados))
-        return todos_dados
-
-    except Exception as e:
-        logging.error("Erro na extração: %s", e)
-        return []
-
-
-def load_stage(data):
+def load_stage(data_chunk):
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -105,47 +41,87 @@ def load_stage(data):
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
         """
         
-        if data:
-            logging.info("Dados a serem inseridos: %s", data)
-
-            for record in data:
-                values = (
-                    str(record['tipo_registro']),
-                    str(record['data_pregao']),
-                    str(record['cod_bdi']),
-                    str(record['cod_negociacao']),
-                    str(record['tipo_mercado']),
-                    str(record['nome_empresa']),
-                    str(record['moeda']),
-                    float(record['preco_abertura']),
-                    float(record['preco_maximo']),
-                    float(record['preco_minimo']),
-                    float(record['preco_medio']),
-                    float(record['preco_ultimo_negocio']),
-                    float(record['preco_melhor_oferta_compra']),
-                    float(record['preco_melhor_oferta_venda']),
-                    str(record['numero_negocios']),
-                    str(record['quantidade_papeis_negociados']),
-                    str(record['volume_total_negociado']),
-                    str(record.get('codigo_isin', '')),
-                    str(record.get('num_distribuicao_papel', ''))
-                )
-
-                logging.info("Executando a inserção com os valores: %s", values)
-                cursor.execute(insert_query, values)
-            
-            conn.commit()
-            logging.info("Dados inseridos com sucesso.")
-        else:
-            logging.warning("Nenhum dado para inserir na tabela stage.")
-
+        for record in data_chunk:
+            values = (
+                str(record['tipo_registro']),
+                str(record['data_pregao']),
+                str(record['cod_bdi']),
+                str(record['cod_negociacao']),
+                str(record['tipo_mercado']),
+                str(record['nome_empresa']),
+                str(record['moeda']),
+                float(record['preco_abertura']),
+                float(record['preco_maximo']),
+                float(record['preco_minimo']),
+                float(record['preco_medio']),
+                float(record['preco_ultimo_negocio']),
+                float(record['preco_melhor_oferta_compra']),
+                float(record['preco_melhor_oferta_venda']),
+                str(record['numero_negocios']),
+                str(record['quantidade_papeis_negociados']),
+                str(record['volume_total_negociado']),
+                str(record.get('codigo_isin', '')),
+                str(record.get('num_distribuicao_papel', ''))
+            )
+            cursor.execute(insert_query, values)
+        
+        conn.commit()
+        logging.info("Chunk inserido com sucesso.")
     except Exception as e:
-        logging.error(f"Erro ao inserir dados: {e}")
+        logging.error(f"Erro ao inserir chunk: {e}")
         conn.rollback()
-
     finally:
         cursor.close()
         conn.close()
+
+def extract():
+    logging.info("Iniciando a extração...")
+    anos = ['2022', '2023', '2024']
+    arquivos = [f'/opt/airflow/files/COTAHIST_A{ano}.txt' for ano in anos]
+    
+    separar_campos = [2, 8, 2, 12, 3, 12, 10, 3, 4, 13, 13, 13, 13, 13, 13, 13, 5, 18, 18, 13, 1, 8, 7, 13, 12, 3]
+    colunas = [
+        "tipo_registro", "data_pregao", "cod_bdi", "cod_negociacao", "tipo_mercado", 
+        "nome_empresa", "especificacao_papel", "prazo_dias_merc_termo", "moeda", 
+        "preco_abertura", "preco_maximo", "preco_minimo", "preco_medio", 
+        "preco_ultimo_negocio", "preco_melhor_oferta_compra", "preco_melhor_oferta_venda", 
+        "numero_negocios", "quantidade_papeis_negociados", "volume_total_negociado", 
+        "preco_exercicio", "indicador_correcao_precos", "data_vencimento", 
+        "fator_cotacao", "preco_exercicio_pontos", "codigo_isin", "num_distribuicao_papel"
+    ]
+
+    chunk_size = 10000
+    
+    try:
+        for arquivo in arquivos:
+            logging.info("Processando arquivo: %s", arquivo)
+            
+            if not os.path.isfile(arquivo):
+                logging.error("Arquivo não encontrado: %s", arquivo)
+                continue
+
+            for chunk in pd.read_fwf(arquivo, widths=separar_campos, header=0, chunksize=chunk_size):
+                logging.info("Lendo um bloco de dados...")
+                
+                chunk.columns = colunas
+                
+                dinheiro = [
+                    "preco_abertura", "preco_maximo", "preco_minimo", 
+                    "preco_medio", "preco_ultimo_negocio", 
+                    "preco_melhor_oferta_compra", "preco_melhor_oferta_venda"
+                ]
+
+                for coluna in dinheiro:
+                    if coluna in chunk.columns:
+                        chunk[coluna] = chunk[coluna].astype(float) / 100
+
+                chunk['data_pregao'] = pd.to_datetime(chunk['data_pregao'], format='%Y%m%d', errors='coerce')
+                chunk['data_pregao'] = chunk['data_pregao'].dt.strftime('%d/%m/%Y')
+                
+                load_stage(chunk.to_dict(orient='records'))
+
+    except Exception as e:
+        logging.error("Erro na extração: %s", e)
 
 def insert_calendar_data(conn):
     """Insere dados na tabela de calendário, convertendo data_pregao para DATE."""
@@ -199,13 +175,6 @@ def transform_and_enrich():
 
 with DAG('cotahist_etl', schedule_interval='@daily', start_date=datetime(2024, 1, 1), catchup=False) as dag:
     extract_task = PythonOperator(task_id='extract', python_callable=extract)
-    
-    load_stage_task = PythonOperator(
-        task_id='load_stage',
-        python_callable=load_stage,
-        op_kwargs={'data': extract_task.output}
-    )
-    
     transform_and_enrich_task = PythonOperator(task_id='transform_and_enrich', python_callable=transform_and_enrich)
 
-    extract_task >> load_stage_task >> transform_and_enrich_task
+    extract_task >> transform_and_enrich_task
